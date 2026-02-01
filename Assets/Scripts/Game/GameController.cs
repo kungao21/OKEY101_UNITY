@@ -40,7 +40,7 @@ public class GameController : MonoBehaviour
     [Header("Layout")]
     public float pileXStep = 0.035f;   // Deste kolonlari arasi X
     public float tileYStep = 0.004f;   // Kolon icinde taslarin Y stack farki
-    public float dealFlySeconds = 0.30f;    // kisa lineer ucus
+    public float dealFlySeconds = 1.00f;    // kisa lineer ucus
 
 
 
@@ -72,6 +72,7 @@ public class GameController : MonoBehaviour
 
     // ===================== TILE POOL (106) + VISUAL POOL =====================
     private const int TOTAL_TILES = 106;
+    
 
     private readonly List<TileObj> _tilesAll = new List<TileObj>(TOTAL_TILES);
     private readonly Stack<TileObj> _tilesFree = new Stack<TileObj>(TOTAL_TILES);
@@ -99,8 +100,9 @@ public class GameController : MonoBehaviour
 
     private string _prevState = "";
 
-    // ===== DEAL BUNDLE (tek blok uçuş) =====
-    private Transform _dealBundleRoot;
+    // ===== DEAL BUNDLE POOL (her animasyon kendi bundle'ını alır) =====
+    private readonly Stack<Transform> _dealBundlePool = new Stack<Transform>(16);
+
 
 
     // zaten var
@@ -185,11 +187,13 @@ public class GameController : MonoBehaviour
             {
                 // ✅ sadece listeleri değil, taşları da gerçekten pool’a geri topla
                 ReturnAllRackTilesToFree();
-                ReturnAllPilesToFree();
+                //ReturnAllPilesToFree();
 
                 _earlyMyTileIds.Clear();
                 _pendingMineQueue.Clear();
                 _tileById.Clear();
+                _hasLast = false;      // ✅ BUNU EKLE
+                _lastDealLeft = -1;    // ✅ BUNU EKLE
             }
 
             _prevState = state;
@@ -217,10 +221,22 @@ public class GameController : MonoBehaviour
         }
 
         // ✅ Sonra render et (pileRoot map temizlenip yeniden kurulacak)
-        if (state == "BUILD_PILES" || state == "DICE" || state == "DEALING")
+        if (state == "BUILD_PILES")
         {
             RenderBuildPiles(p);
         }
+
+        if (state == "DICE_RESULT")
+        {
+            SyncPilesFromCounts(p);
+            RenderBuildPiles(p);
+        }
+
+        if (state == "DICE")
+        {
+            //RenderBuildPiles(p);
+        }
+
 
         // ✅ Eğer benim rack’e arka taşlar geldiyse, myHand diff ile yüz’e çevir
         ResolveMyPendingHand(p);
@@ -229,6 +245,66 @@ public class GameController : MonoBehaviour
 
 
     }
+
+    private void SyncPilesFromCounts(JObject p)
+    {
+        int startPile = p.Value<int?>("startPile") ?? 1;
+        int indicatorPile = p.Value<int?>("indicatorPile") ?? 0;
+        int basePile = 1; // 8’li deste (server tarafında buradan eksiltiyorsun)
+
+        bool IsAllowed(int pid) =>
+            pid == basePile || pid == startPile || (indicatorPile > 0 && pid == indicatorPile);
+
+
+
+        var counts = p["pileCounts"] as JObject;
+        if (counts == null) return;
+
+        for (int pileId = 1; pileId <= 15; pileId++)
+        {
+            if (!IsAllowed(pileId)) continue;
+
+            // serverCount oku
+            int serverCount = counts.Value<int?>($"{pileId}") ?? -1;
+            if (serverCount < 0) continue;
+
+            // unity list
+            if (!_pileTiles.TryGetValue(pileId, out var list) || list == null) continue;
+            int before = list.Count;
+
+            // ✅ hedef sayıya çek (fazlaysa ReturnTileToFree ile pool'a gider, azsa _tilesFree'den alınır)
+            EnsurePileTileCount(pileId, serverCount);
+
+            int after = list.Count;
+
+            // ✅ Eksikse pool'dan yeni tile geldi: bunları pileRoot altına koy + arka yap
+            if (after > before)
+            {
+                if (_pileRootPool.TryGetValue(pileId, out var root) && root != null)
+                {
+                    for (int i = before; i < after; i++)
+                    {
+                        var tile = list[i];
+                        if (tile == null) continue;
+
+                        tile.transform.SetParent(root, false);
+                        tile.transform.localPosition = Vector3.zero;
+                        tile.transform.localRotation = Quaternion.identity;
+                        tile.transform.localScale = Vector3.one;
+
+                        // yeni eklenen taşlar ARKA kalsın
+                        SetTileBack(tile);
+                    }
+                }
+            }
+
+            // ✅ Hepsini tekrar stackle
+            RestackPileVisual(pileId);
+        }
+    }
+
+
+
 
     private int CountPlayers(JObject playersObj)
     {
@@ -317,6 +393,9 @@ public class GameController : MonoBehaviour
             // ✅ kolon index artık deal-order’a göre birikir
             int k = colIndexBySeat[ownerSeat];
             colIndexBySeat[ownerSeat] = k + 1;
+
+
+
 
             pileRoot.localPosition = new Vector3(k * pileXStep, 0f, 0f);
             pileRoot.localRotation = Quaternion.identity;
@@ -441,6 +520,8 @@ public class GameController : MonoBehaviour
             // ✅ bundle uçuş: bu tick’te giden 7/8 taş tek blok gibi uçar
             StartCoroutine(FlyBundleThenDistribute(p, targetSeat, moved, src, srcRot));
 
+            Debug.Log("Target Seat : "+targetSeat.ToString());
+
 
 
         }
@@ -458,8 +539,8 @@ public class GameController : MonoBehaviour
         var seatToRack = BuildSeatToRackMap(mySeat);
         if (!seatToRack.TryGetValue(targetSeat, out var rack) || rack == null) yield break;
 
-        var bundle = EnsureDealBundleRoot();
-        bundle.gameObject.SetActive(true);
+        var bundle = GetDealBundle();
+
 
         // bundle başlangıç transform
         bundle.SetParent(null, true);
@@ -525,11 +606,8 @@ public class GameController : MonoBehaviour
             TryFlushEarlyIdsToPending();
 
         // bundle’ı tekrar pool altına sakla
-        bundle.gameObject.SetActive(false);
-        bundle.SetParent(tilePoolRoot != null ? tilePoolRoot : transform, false);
-        bundle.localPosition = Vector3.zero;
-        bundle.localRotation = Quaternion.identity;
-        bundle.localScale = Vector3.one;
+        ReturnDealBundle(bundle);
+
     }
 
 
@@ -613,19 +691,44 @@ public class GameController : MonoBehaviour
     // ===================== INIT: 106 TileObj =====================
 
 
-    private Transform EnsureDealBundleRoot()
+    private Transform GetDealBundle()
     {
-        if (_dealBundleRoot != null) return _dealBundleRoot;
+        Transform b = null;
 
-        var go = new GameObject("DealBundleRoot");
-        _dealBundleRoot = go.transform;
-        _dealBundleRoot.SetParent(tilePoolRoot != null ? tilePoolRoot : transform, false);
-        _dealBundleRoot.localPosition = Vector3.zero;
-        _dealBundleRoot.localRotation = Quaternion.identity;
-        _dealBundleRoot.localScale = Vector3.one;
-        _dealBundleRoot.gameObject.SetActive(false);
-        return _dealBundleRoot;
+        if (_dealBundlePool.Count > 0)
+            b = _dealBundlePool.Pop();
+
+        if (b == null)
+        {
+            var go = new GameObject("DealBundle");
+            b = go.transform;
+        }
+
+        b.gameObject.SetActive(true);
+        b.SetParent(tilePoolRoot != null ? tilePoolRoot : transform, false);
+        b.localPosition = Vector3.zero;
+        b.localRotation = Quaternion.identity;
+        b.localScale = Vector3.one;
+        return b;
     }
+
+    private void ReturnDealBundle(Transform b)
+    {
+        if (b == null) return;
+
+        // güvenlik: bundle altında child kaldıysa ayır
+        for (int i = b.childCount - 1; i >= 0; i--)
+            b.GetChild(i).SetParent(null, true);
+
+        b.gameObject.SetActive(false);
+        b.SetParent(tilePoolRoot != null ? tilePoolRoot : transform, false);
+        b.localPosition = Vector3.zero;
+        b.localRotation = Quaternion.identity;
+        b.localScale = Vector3.one;
+
+        _dealBundlePool.Push(b);
+    }
+
 
     // startPile’dan başlayıp 15’e kadar, sonra 1..startPile-1
     private List<int> BuildDealOrder(int startPile)
@@ -1002,13 +1105,5 @@ public class GameController : MonoBehaviour
         var v = TakeVisual(code);
         tile.AttachVisual(v, code);
     }
-
-
-
-
-
-
-
-
 
 }

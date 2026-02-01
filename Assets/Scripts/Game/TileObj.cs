@@ -1,4 +1,5 @@
-﻿using UnityEngine;
+﻿using System;
+using UnityEngine;
 
 /// <summary>
 /// Oyundaki TEK bir fiziksel taşı temsil eder.
@@ -12,6 +13,10 @@ public class TileObj : MonoBehaviour
     /// Henüz bilinmiyorsa boş string.
     /// </summary>
     public string TileId { get; private set; } = "";
+    private RackInteractionController _rack;
+
+
+
 
     /// <summary>
     /// Görsel prefabın takıldığı slot
@@ -95,11 +100,68 @@ public class TileObj : MonoBehaviour
     }
 
 
-    private void OnMouseDown()
+    //private void OnMouseDown()
+    //{
+    //    Debug.Log("Tıklandı...." + TileId);
+    //    GameController.Instance.OnTileClicked(this);
+    //}
+    void OnMouseDown()
     {
-        Debug.Log("Tıklandı...."+TileId);
-        GameController.Instance.OnTileClicked(this);
+        // 1) Sahnedeki tek RackInteractionController'ı bul
+        if (_rack == null)
+            _rack = FindObjectOfType<RackInteractionController>();
+
+        if (_rack == null)
+        {
+            Debug.LogError("[TileObj] RackInteractionController bulunamadı (GameController objesine component ekli mi?)");
+            return;
+        }
+
+        // 2) Yetki kontrolü: sadece MAIN rackRoot altındaki taşlara izin
+        if (!_rack.OwnsTile(this))
+            return;
+
+        _rack.BeginDrag(this);
     }
+
+    void OnMouseDrag()
+    {
+        if (_rack == null) return;
+        if (!_rack.OwnsTile(this)) return;
+
+        _rack.DragMove();
+    }
+
+    void OnMouseUp()
+    {
+        if (_rack == null) return;
+        if (!_rack.OwnsTile(this)) return;
+
+        _rack.EndDrag();
+    }
+
+
+
+    //void Update()
+    //{
+    //    if (Input.GetMouseButtonDown(0))
+    //    {
+    //        var cam = Camera.main;
+    //        Debug.Log("Camera.main = " + (cam ? cam.name : "NULL"));
+
+    //        if (!cam) return;
+
+    //        var ray = cam.ScreenPointToRay(Input.mousePosition);
+    //        if (Physics.Raycast(ray, out var hit, 999f))
+    //            Debug.Log("HIT: " + hit.collider.name);
+    //        else
+    //            Debug.Log("NO HIT");
+    //    }
+    //}
+
+
+
+
 
     public void FitColliderToCurrentVisual()
     {
